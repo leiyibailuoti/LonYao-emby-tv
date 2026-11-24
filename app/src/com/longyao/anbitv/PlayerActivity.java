@@ -94,7 +94,8 @@ public class PlayerActivity extends Activity implements MediaPlayer.EventListene
     private int vCodedW, vCodedH, vVisW, vVisH, vSarN, vSarD;
     /** 已经下发给 VLC 的窗口尺寸，避免反复重配 surface */
     private int lastWinW = -1, lastWinH = -1;
-    private boolean lastWinSoft = false;   // 上次设窗口时是不是软解，切档后要重设`r`n    private boolean lastWinSoft = false;   // 上次设窗口时是否为软解，切换解码档后要重设
+    private boolean lastWinSoft = false;   // 上次设窗口时是不是软解，切档后要重设
+    private boolean lastWin4K = false;     // 上次按「4K 直出」跳过设窗口，片子改小后要补设
     private int geomLogW = -1, geomLogH = -1, geomLogVW = -1;
     private boolean hwDecode = true;
 
@@ -153,6 +154,9 @@ public class PlayerActivity extends Activity implements MediaPlayer.EventListene
         seriesId = sid0 == null ? "" : sid0;
 
         pstore = new Store(this);
+        // 调试用：intent 带 dm=0/1/2 时切到对应解码方式（adb 三档验证用）
+        int dbgDm = getIntent().getIntExtra("dm", -1);
+        if (dbgDm >= 0 && dbgDm <= 2) pstore.decodeMode(dbgDm);
         aspectIdx = pstore.aspect();   // 画面比例沿用上次的选择，两个内核共用
         String pl = getIntent().getStringExtra("plist");
         if (pl != null && !pl.isEmpty()) plist = pl.split("\n");
@@ -2402,38 +2406,35 @@ public class PlayerActivity extends Activity implements MediaPlayer.EventListene
     }
 
     /**
-     * VLC 的「窗口尺寸」决定它把画面画成多大：4K 用片子原始尺寸（硬解零拷贝直出），
-     * 低分辨率/软件解码则贴合屏幕上的显示矩形，避免小画面被整个拉变形。
+     * VLC 的「窗口尺寸」决定它把画面画成多大。当贝这类 Amlogic 合成器不会把
+     * 比显示区小的视频缓冲自动放大——老容器小片子（avi/mpeg4 640x480、rm/rv40 352x240…）
+     * 不管硬解直出还是系统解码，画面都只剩左下角一小块。
+     * 所以除 4K（零拷贝直出更稳）之外，一律把窗口设成屏幕上的显示矩形，让 vout 自己缩放铺满。
      */
     private void syncWindowSize(int w, int h, boolean force) {
         if (mp == null || w <= 0 || h <= 0) return;
-        // 4K 及以上：按片子原始尺寸开窗，硬解零拷贝直出，比例由屏幕矩形缩放决定；
-        // 标清/高清：窗口贴合屏幕上的显示矩形，VLC 自己按「原画/全屏/4:3/16:9」策略渲染，
-        // 小分辨率片子不会被拉成一小块或者变形。
-        // 软件解码：vout 走 android_display，按片子原始分辨率开视频层缓冲，
-        // 当贝这类 Amlogic 合成器不做任意缓冲缩放 → 小画面贴在左下角一角。
-        // 所以软解必须显式告诉 VLC「窗口多大」，由它自己把画面缩放到这个窗口。
         boolean soft = vlcSoftNow || (pstore != null && pstore.decodeMode() == 1);
-        if (!soft) {
-            // 硬解（mediacodec 直通）：维持零拷贝直出，不设窗口尺寸。
-            // 4K 片上 setWindowSize 会让 android 窗口模块走不支持的路径（request 1 not implemented 逐帧刷屏）。
-            int tw = w, th = h;
-            if (!force && tw == lastWinW && th == lastWinH && !lastWinSoft) return;
-            lastWinW = tw; lastWinH = th; lastWinSoft = false;
-            android.util.Log.e("LMBY", "skip setWindowSize (vout native size) w=" + w + " h=" + h);
+        // 硬解/系统解码时片子多大还不知道就先不设，等 vout/track 报了几何再设，
+        // 免得 4K 片子先被按 1080 设了一次窗口
+        if (vCodedW <= 0 && !soft) return;
+        boolean uhd = !soft && (vCodedW >= 2560 || vCodedH >= 1440);
+        if (!force && w == lastWinW && h == lastWinH && soft == lastWinSoft && uhd == lastWin4K) return;
+        lastWinW = w; lastWinH = h; lastWinSoft = soft; lastWin4K = uhd;
+        if (uhd) {
+            // 4K 片上 setWindowSize 会让 android 窗口模块走不支持的路径
+            // （request 1 not implemented 逐帧刷屏），继续按片子原始尺寸直出
+            android.util.Log.e("LMBY", "skip setWindowSize (4K 直出) " + w + "x" + h
+                    + " coded=" + vCodedW + "x" + vCodedH);
             return;
         }
-        int tw = w, th = h;
-        if (!force && tw == lastWinW && th == lastWinH && lastWinSoft) return;
-        lastWinW = tw; lastWinH = th; lastWinSoft = true;
+        int dm = pstore == null ? 2 : pstore.decodeMode();
         try {
-            mp.getVLCVout().setWindowSize(tw, th);
-            android.util.Log.e("LMBY", "setWindowSize(软解) " + tw + "x" + th
-                    + " coded=" + vCodedW + "x" + vCodedH);
+            mp.getVLCVout().setWindowSize(w, h);
+            android.util.Log.e("LMBY", "setWindowSize(" + (soft ? "软解" : (dm == 0 ? "硬解" : "系统"))
+                    + ") " + w + "x" + h + " coded=" + vCodedW + "x" + vCodedH);
         } catch (Throwable t) {
             android.util.Log.e("LMBY", "setWindowSize 失败: " + t);
         }
-        return;
     }
 
     private void applyAspect() {
