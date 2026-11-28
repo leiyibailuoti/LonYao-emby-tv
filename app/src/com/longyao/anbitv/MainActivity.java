@@ -53,7 +53,6 @@ public class MainActivity extends Activity {
         Crash.install(getApplicationContext());
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         store = new Store(this);
-        store.secure(false);
         Img.init(this);
         if (store.uiTheme() > 1) store.uiTheme(0);   // 潮牌已下线，老设置回落到玻璃
         U.applyTheme(store.uiTheme());
@@ -62,7 +61,10 @@ public class MainActivity extends Activity {
         U.FOCUS_ZOOM = store.zoom();
         Api.DIRECT_ONLY = store.directOnly();
         U.SCROLL_ANIM = 1;   // 翻页曲线固定成官方列表同款，设置里不再暴露
-        if (store.bg() > 32) store.bg(0);   // 背景图编号超出内置范围（老版本残留）就回退「原生」
+        // 背景图编号校验：0..32 是内置壁纸，U.BG_CUSTOM（扫码上传的自定义壁纸）也要留着，
+        // 只有真正的越界值才回落「原生」——原来的 bg() > 32 会把用户上传的壁纸每次启动清掉
+        int bgv = store.bg();
+        if (bgv != U.BG_CUSTOM && (bgv < 0 || bgv > 32)) store.bgAuto(0);
         U.applyFont(this, store.font());
         U.applyTxt(store.txtColor());
         U.prepareBg(this, store.bg());
